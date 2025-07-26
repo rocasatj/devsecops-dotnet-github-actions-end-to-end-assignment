@@ -1,124 +1,95 @@
-name: DevSecOps Pipeline - C# Application with SonarCloud, Snyk SCA, and DAST
-on: 
+name: DevSecOps Pipeline - C# App
+
+on:
   push:
-    branches: [ main, master, develop ]
- # pull_request:
- #   branches: [ main, master ]
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
 
 jobs:
   build-and-sast:
     runs-on: ubuntu-latest
-    name: Build C# app and run SAST scan with SonarCloud
+    name: Build and SAST with SonarCloud
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0  # Shallow clones should be disabled for better relevancy of analysis
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Setup .NET Core
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '8.0.x'  # Adjust version as needed
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-    - name: Cache SonarCloud packages
-      uses: actions/cache@v4
-      with:
-        path: ~\sonar\cache
-        key: ${{ runner.os }}-sonar
-        restore-keys: ${{ runner.os }}-sonar
+      - name: Install SonarScanner
+        run: |
+          dotnet tool update dotnet-sonarscanner --tool-path .sonar
 
-    - name: Cache SonarCloud scanner
-      id: cache-sonar-scanner
-      uses: actions/cache@v4
-      with:
-        path: .\.sonar\scanner
-        key: ${{ runner.os }}-sonar-scanner
-        restore-keys: ${{ runner.os }}-sonar-scanner
+      - name: Restore dependencies
+        run: dotnet restore
 
-    - name: Install SonarCloud scanner
-      if: steps.cache-sonar-scanner.outputs.cache-hit != 'true'
-      shell: powershell
-      run: |
-        New-Item -Path .\.sonar\scanner -ItemType Directory
-        dotnet tool update dotnet-sonarscanner --tool-path .\.sonar\scanner
+      - name: Run SonarCloud analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          .sonar/dotnet-sonarscanner begin /k:"rocasatjmio_analisisc" /o:"rocasatjmio" /d:sonar.token="${{ secrets.SONAR_TOKEN }}" /d:sonar.host.url="https://sonarcloud.io"
+          dotnet build --configuration Release --no-restore
+          .sonar/dotnet-sonarscanner end /d:sonar.token="${{ secrets.SONAR_TOKEN }}"
 
-    - name: Restore dependencies
-      run: dotnet restore
-
-    - name: Build and analyze with SonarCloud
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      shell: powershell
-      run: |
-        .\.sonar\scanner\dotnet-sonarscanner begin /k:"rocasatjmio_analisisc" /o:"rocasatjmio" /d:sonar.token="${{ secrets.SONAR_TOKEN }}" /d:sonar.host.url="https://sonarcloud.io"
-        dotnet build --configuration Release --no-restore
-        .\.sonar\scanner\dotnet-sonarscanner end /d:sonar.token="${{ secrets.SONAR_TOKEN }}"
-
-    - name: Run unit tests
-      run: dotnet test --configuration Release --no-build --verbosity normal --collect:"XPlat Code Coverage" --results-directory ./coverage
-
-    - name: Upload test results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: test-results
-        path: ./coverage
-
-  sca-security-scan:
+  sca-snyk:
     runs-on: ubuntu-latest
+    name: SCA scan with Snyk
     needs: build-and-sast
-    name: Run SCA scan with Snyk
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Setup .NET Core
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '8.0.x'
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-    - name: Restore dependencies
-      run: dotnet restore
+      - name: Restore dependencies
+        run: dotnet restore
 
-    - name: Run Snyk to check for vulnerabilities
-      uses: snyk/actions/dotnet@master
-      continue-on-error: true
-      env:
-        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      with:
-        args: --severity-threshold=high
+      - name: Run Snyk scan
+        uses: snyk/actions/dotnet@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --sarif-file-output=snyk.sarif
 
-    - name: Upload Snyk results to GitHub Code Scanning
-      uses: github/codeql-action/upload-sarif@v3
-      if: always()
-      with:
-        sarif_file: snyk.sarif
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: snyk.sarif
 
-  dast-security-scan:
+  dast-zap:
     runs-on: ubuntu-latest
-    needs: sca-security-scan
-    name: Run DAST scan with OWASP ZAP
+    name: DAST scan with OWASP ZAP
+    needs: sca-snyk
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: OWASP ZAP Baseline Scan
-      uses: zaproxy/action-baseline@v0.14.0
-      with:
-        target: 'http://example.com'
-        rules_file_name: '.zap/rules.tsv'
-        cmd_options: '-a'
+      - name: Prepare ZAP rules (optional)
+        run: |
+          mkdir -p .zap
+          echo -e "10015\tIGNORE\t(No Cache-Control Header)" > .zap/rules.tsv
+          echo -e "10021\tIGNORE\t(Missing X-Content-Type-Options Header)" >> .zap/rules.tsv
 
-    - name: Create ZAP rules file (if not exists)
-      run: |
-        mkdir -p .zap
-        echo -e "10015\tIGNORE\t(Incomplete or No Cache-control Header Set)" > .zap/rules.tsv
-        echo -e "10021\tIGNORE\t(X-Content-Type-Options Header Missing)" >> .zap/rules.tsv
+      - name: Run ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: 'http://example.com'
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
 
-    - name: Upload ZAP results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: zap-report
-        path: report_html.html
+      - name: Upload ZAP report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: report_html.html
